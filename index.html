@@ -23,7 +23,7 @@
       box-shadow:
         inset 8px 8px 16px var(--soft-shadow),
         inset -8px -8px 16px var(--soft-highlight);
-      touch-action: none; /* <-- evita scroll/zoom al tocar el canvas */
+      touch-action: none;
     }
     #startScreen, #overlay {
       position:absolute; top:0; left:0;
@@ -109,6 +109,9 @@
   const LOSE_SOUND= 'lose.mp3';
   const WIN_IMAGE = 'no se que.png';
 
+  // Límite de ángulo de rebote en paleta (respecto a la vertical)
+  const MAX_BOUNCE_ANGLE = Math.PI / 3; // 60°
+
   // Canvas retina-aware
   const canvas = document.getElementById('game'),
         ctx    = canvas.getContext('2d'),
@@ -129,10 +132,33 @@
         sfxWin  = new Audio(WIN_SOUND),
         sfxLose = new Audio(LOSE_SOUND);
 
+  // iOS: desbloquear audio en primer gesto del usuario
+  let audioUnlocked = false;
+  function unlockAudio(){
+    if (audioUnlocked) return;
+    [sfxHit, sfxWin, sfxLose].forEach(a=>{
+      a.muted = true;
+      a.play().then(()=>{ a.pause(); a.currentTime = 0; a.muted = false; }).catch(()=>{});
+    });
+    audioUnlocked = true;
+  }
+
   // Estado
   let score=0, lives=3, playing=false, confettiActive=false;
   let ball, paddle, bricks;
   let left=false, right=false;
+
+  // Detección simple de dispositivo táctil
+  const isTouchDevice = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+
+  // Delta time normalizado a 60 FPS (evita que 90/120 Hz aceleren el juego)
+  let lastTime = performance.now();
+  const STEP = 1000/60;
+  function getDT(now){
+    const dt = (now - lastTime) / STEP; // 1.0 ~ 60FPS
+    lastTime = now;
+    return Math.max(0.5, Math.min(dt, 1.5)); // clamp para estabilidad
+  }
 
   // Confetti
   const confetti=[];
@@ -150,8 +176,13 @@
       });
     }
   }
-  function updateConfetti(){
-    confetti.forEach(c=>{ c.x+=c.vx; c.y+=c.vy; c.rot+=c.vrot; if(c.y>innerHeight) c.y=-10; });
+  function updateConfetti(dt){
+    confetti.forEach(c=>{
+      c.x += c.vx * dt;
+      c.y += c.vy * dt;
+      c.rot += c.vrot * dt;
+      if(c.y>innerHeight) c.y=-10;
+    });
   }
   function drawConfetti(){
     confetti.forEach(c=>{
@@ -171,7 +202,7 @@
         img          = document.getElementById('winImg'),
         btnRestart   = document.getElementById('btnRestart');
 
-  startBtn.onclick   = () => { startScreen.style.display='none'; init(); };
+  startBtn.onclick   = () => { unlockAudio(); startScreen.style.display='none'; init(); };
   btnRestart.onclick = init;
 
   // Teclado
@@ -184,9 +215,6 @@
     if(e.key==='ArrowRight') right=false;
   });
 
-  // Detectar touch
-  const isTouchDevice = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
-
   // Mover paleta a posición X del cliente
   function movePaddleTo(clientX){
     if(!paddle) return;
@@ -194,14 +222,13 @@
     paddle.x = Math.max(0, Math.min(innerWidth - paddle.w, newX));
   }
 
-  // CONTROL TÁCTIL DIRECTO: tocar mueve al instante; arrastrar sigue la posición.
-  // Usamos Pointer API (unifica touch/mouse/pen). También añadimos fallback touch events para compatibilidad.
+  // Control táctil directo
   let touchActive = false;
 
   // Pointer handlers
   canvas.addEventListener('pointerdown', (e)=>{
-    // aceptar touch y pen; también aceptar mouse si quieres probar con clic
     e.preventDefault();
+    unlockAudio();
     touchActive = true;
     movePaddleTo(e.clientX);
   }, {passive:false});
@@ -212,14 +239,15 @@
     movePaddleTo(e.clientX);
   }, {passive:false});
 
-  window.addEventListener('pointerup', (e)=>{
+  window.addEventListener('pointerup', ()=>{
     if(!touchActive) return;
     touchActive = false;
   });
 
-  // Fallback touch-only (algunos navegadores)
+  // Fallback touch-only
   canvas.addEventListener('touchstart', (ev) => {
     ev.preventDefault();
+    unlockAudio();
     touchActive = true;
     const t = ev.touches[0];
     if(t) movePaddleTo(t.clientX);
@@ -229,9 +257,12 @@
     const t = ev.touches[0];
     if(t) movePaddleTo(t.clientX);
   }, {passive:false});
-  canvas.addEventListener('touchend', (ev) => {
+  canvas.addEventListener('touchend', () => {
     touchActive = false;
   }, {passive:false});
+
+  // Escala de velocidad solo en móviles (un 10% más lento que PC)
+  const MOBILE_SPEED_SCALE = 0.9;
 
   // Inicializar juego
   function init(){
@@ -243,8 +274,15 @@
     title.textContent = ''; text.textContent = '';
 
     const W = innerWidth;
-    paddle = { w: W*0.15, h:12, x:(W-W*0.15)/2, speed:8 };
-    ball = { r:10, x:W/2, y:innerHeight-60, vx:4*(Math.random()>0.5?1:-1), vy:-4 };
+    const paddleW = W*0.15;
+    paddle = { w: paddleW, h:12, x:(W-paddleW)/2, speed:8 }; // velocidad original de paleta
+
+    // Velocidad base original: ±4 px/frame a 60fps
+    const scale = isTouchDevice ? MOBILE_SPEED_SCALE : 1;
+    const base = 4 * scale;
+    const dir = (Math.random()>0.5?1:-1);
+
+    ball = { r:10, x:W/2, y:innerHeight-60, vx:base*dir, vy:-base };
 
     bricks=[]; let idx=0;
     const cols=5, rows=5, pad=12;
@@ -255,7 +293,9 @@
         idx++;
       }
     }
-    resize(); requestAnimationFrame(loop);
+    resize();
+    lastTime = performance.now();
+    requestAnimationFrame(loop);
   }
 
   // Colisión círculo-rect
@@ -281,29 +321,40 @@
     ctx.beginPath(); ctx.fillStyle='#fff'; ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI*2); ctx.fill();
   }
 
-  // Update physics
-  function update(){
+  // Update physics (con dt)
+  function update(dt){
     if(playing){
-      // Si hay interacción táctil activa, priorizamos el touch directo (no aplicar teclado)
       if(!touchActive){
-        if(left)  paddle.x=Math.max(0,paddle.x-paddle.speed);
-        if(right) paddle.x=Math.min(innerWidth-paddle.w,paddle.x+paddle.speed);
+        if(left)  paddle.x=Math.max(0,paddle.x-paddle.speed*dt);
+        if(right) paddle.x=Math.min(innerWidth-paddle.w,paddle.x+paddle.speed*dt);
       }
       paddle.x = Math.max(0, Math.min(innerWidth - paddle.w, paddle.x));
 
-      ball.x+=ball.vx; ball.y+=ball.vy;
-      if(ball.x+ball.r>innerWidth||ball.x-ball.r<0) ball.vx*=-1;
-      if(ball.y-ball.r<0) ball.vy*=-1;
+      ball.x+=ball.vx*dt;
+      ball.y+=ball.vy*dt;
 
+      // Paredes
+      if(ball.x+ball.r>innerWidth){ ball.x = innerWidth - ball.r; ball.vx*=-1; }
+      if(ball.x-ball.r<0){          ball.x = ball.r;              ball.vx*=-1; }
+      if(ball.y-ball.r<0){          ball.y = ball.r;              ball.vy*=-1; }
+
+      // ⚖️ velocidad constante en rebote con paleta
       if(collide(ball,{x:paddle.x,y:innerHeight-40,w:paddle.w,h:paddle.h}) && ball.vy>0){
-        ball.vy*=-1;
-        const hit=(ball.x-(paddle.x+paddle.w/2))/(paddle.w/2), speed=Math.hypot(ball.vx,ball.vy);
-        ball.vx=speed*hit; ball.vy=-Math.abs(speed);
+        const sp = Math.hypot(ball.vx, ball.vy);          // velocidad actual (se conserva)
+        const rel = (ball.x - (paddle.x + paddle.w/2)) / (paddle.w/2); // -1..1
+        const clamped = Math.max(-1, Math.min(1, rel));
+        const angle = clamped * MAX_BOUNCE_ANGLE;         // -60°..60° respecto a vertical
+        ball.vx = sp * Math.sin(angle);
+        ball.vy = -sp * Math.cos(angle);
+        ball.y = innerHeight - 40 - ball.r - 0.5;         // evita “pegarse” a la paleta
+        sfxHit.currentTime=0; sfxHit.play().catch(()=>{});
       }
 
+      // Ladrillos (mantiene norma, solo invierte vy)
       for(const b of bricks){
         if(b.active && collide(ball,b)){
-          b.active=false; ball.vy*=-1;
+          b.active=false; 
+          ball.vy*=-1;
           score++; hudScore.textContent=`Score: ${score}/${TARGET}`;
           sfxHit.currentTime=0; sfxHit.play().catch(()=>{});
           if(score>=TARGET) return win();
@@ -311,19 +362,23 @@
         }
       }
 
+      // Caída
       if(ball.y-ball.r>innerHeight){
         lives--; hudLives.textContent=`Lives: ${lives}`;
         if(lives<=0) return lose();
+        const scale = isTouchDevice ? MOBILE_SPEED_SCALE : 1;
+        const base = 4 * scale;
         ball.x=innerWidth/2; ball.y=innerHeight-60;
-        ball.vx=4*(Math.random()>0.5?1:-1); ball.vy=-4;
+        ball.vx=base*(Math.random()>0.5?1:-1); ball.vy=-base;
       }
     }
-    if(confettiActive) updateConfetti();
+    if(confettiActive) updateConfetti(dt);
   }
 
   // Loop
-  function loop(){
-    update(); draw();
+  function loop(now){
+    const dt = getDT(now || performance.now());
+    update(dt); draw();
     requestAnimationFrame(loop);
   }
 
